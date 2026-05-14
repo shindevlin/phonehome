@@ -24,10 +24,8 @@ impl ClaudeBackend {
     }
 }
 
-#[async_trait]
-impl super::AiBackend for ClaudeBackend {
-    async fn run(&self, prompt: &str) -> Result<String> {
-        let mut args = self.session_args();
+impl ClaudeBackend {
+    async fn run_with_args(&self, mut args: Vec<String>, prompt: &str) -> Result<String> {
         args.extend(["-p".to_string(), prompt.to_string(), "--print".to_string()]);
 
         let mut child = Command::new("claude")
@@ -53,6 +51,21 @@ impl super::AiBackend for ClaudeBackend {
 
         let combined = format!("{stdout_buf}{stderr_buf}");
         Ok(combined.trim().to_string())
+    }
+}
+
+#[async_trait]
+impl super::AiBackend for ClaudeBackend {
+    async fn run(&self, prompt: &str) -> Result<String> {
+        let result = self.run_with_args(self.session_args(), prompt).await?;
+
+        // Stale session ID — wipe it and retry fresh
+        if result.contains("No conversation found with session ID") {
+            self.cfg.write_session("");
+            return self.run_with_args(vec!["--continue".to_string()], prompt).await;
+        }
+
+        Ok(result)
     }
 
     fn save_session(&self, output: &str) {

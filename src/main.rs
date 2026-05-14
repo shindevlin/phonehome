@@ -1,6 +1,7 @@
 mod backend;
 mod bot;
 mod config;
+mod echo;
 mod init;
 mod notify;
 mod telegram;
@@ -25,6 +26,8 @@ enum Cmd {
     },
     /// Stop hook handler — reads Claude Code JSON from stdin, sends last response to Telegram
     Notify,
+    /// UserPromptSubmit hook — echoes your message to Telegram
+    Echo,
     /// Create ~/.phonehome/config.toml interactively
     Init {
         #[arg(long)]
@@ -52,6 +55,10 @@ async fn main() -> Result<()> {
         Cmd::Notify => {
             let cfg = config::Config::load()?;
             notify::run(cfg).await?;
+        }
+        Cmd::Echo => {
+            let cfg = config::Config::load()?;
+            echo::run(cfg).await?;
         }
         Cmd::Init { bot_token, chat_id, backend } => {
             init::run(bot_token, chat_id, backend)?;
