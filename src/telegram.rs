@@ -52,6 +52,20 @@ impl TelegramClient {
         Ok(())
     }
 
+    pub async fn get_file_path(&self, file_id: &str) -> Result<String> {
+        let resp: serde_json::Value = self.http.post(self.api("getFile"))
+            .json(&json!({ "file_id": file_id }))
+            .send().await?
+            .json().await?;
+        Ok(resp["result"]["file_path"].as_str().unwrap_or("").to_string())
+    }
+
+    pub async fn download_file(&self, file_path: &str) -> Result<Vec<u8>> {
+        let url = format!("https://api.telegram.org/file/bot{}/{}", self.token, file_path);
+        let bytes = self.http.get(&url).send().await?.bytes().await?;
+        Ok(bytes.to_vec())
+    }
+
     pub async fn get_updates(&self, offset: i64) -> Result<Vec<Update>> {
         let resp: serde_json::Value = self.http.post(self.api("getUpdates"))
             .json(&json!({ "offset": offset, "timeout": 10, "limit": 100 }))
@@ -80,6 +94,14 @@ pub struct Message {
     pub from: Option<User>,
     pub chat: Chat,
     pub text: Option<String>,
+    pub voice: Option<AudioFile>,
+    pub audio: Option<AudioFile>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct AudioFile {
+    pub file_id: String,
+    pub duration: Option<i64>,
 }
 
 #[derive(Debug, serde::Deserialize)]

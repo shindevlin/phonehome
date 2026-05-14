@@ -1,10 +1,12 @@
 mod backend;
 mod bot;
+mod whisper;
 mod config;
 mod echo;
 mod init;
 mod notify;
 mod telegram;
+mod transcribe;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
