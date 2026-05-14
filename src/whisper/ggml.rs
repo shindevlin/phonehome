@@ -96,37 +96,45 @@ pub fn load(path: &std::path::Path) -> Result<GgmlFile> {
         let ftype   = read_i32!();
 
         let mut shape = vec![1usize; n_dims.max(1)];
+        if cur + n_dims.saturating_mul(4) > data.len() { break; }
         for i in 0..n_dims {
             shape[i] = read_i32!();
         }
 
+        if cur + name_len > data.len() { break; }
         let name = String::from_utf8_lossy(&data[cur..cur+name_len]).into_owned();
         cur += name_len;
 
-        // align to 32 bytes
-        cur = (cur + 31) & !31;
+        let nelements: usize = if n_dims == 0 { 0 } else { shape.iter().product() };
+        let bytes_per = match ftype { 1 => 2usize, _ => 4usize };
+        let nbytes = nelements * bytes_per;
 
-        let nelements: usize = shape.iter().product();
+        if cur + nbytes > data.len() {
+            eprintln!("[ggml] tensor '{}' shape {:?} ftype {} at offset {}: needs {} bytes, {} remain — stopping",
+                name, shape, ftype, cur, nbytes, data.len().saturating_sub(cur));
+            break;
+        }
+
         let floats: Vec<f32> = match ftype {
             0 => { // f32
-                let v: Vec<f32> = (0..nelements).map(|_| {
+                (0..nelements).map(|_| {
                     let x = f32::from_le_bytes(data[cur..cur+4].try_into().unwrap());
                     cur += 4; x
-                }).collect();
-                v
+                }).collect()
             }
             1 => { // f16
-                let v: Vec<f32> = (0..nelements).map(|_| {
+                (0..nelements).map(|_| {
                     let raw = u16::from_le_bytes(data[cur..cur+2].try_into().unwrap());
                     cur += 2;
                     half::f16::from_bits(raw).to_f32()
-                }).collect();
-                v
+                }).collect()
             }
             _ => bail!("unsupported ftype {}", ftype),
         };
 
-        tensors.insert(name, floats);
+        if !name.is_empty() {
+            tensors.insert(name, floats);
+        }
     }
 
     Ok(GgmlFile { hparams, mel_filters, n_fft_bins: n_fft, vocab, tensors })
