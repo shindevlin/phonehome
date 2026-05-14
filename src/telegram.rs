@@ -23,10 +23,27 @@ impl TelegramClient {
 
     /// Send text in chunks, returns message_id of the first chunk (for deletions)
     pub async fn send(&self, chat_id: i64, text: &str) -> Result<i64> {
-        let clean = if text.trim().is_empty() { "(no output)" } else { text };
+        let raw = text.trim();
+        let clean: &str = if raw.is_empty() { "(no output)" } else { raw };
+
+        // Cap total bytes, then walk back to a valid char boundary
+        let cap = {
+            let mut end = clean.len().min(20000);
+            while !clean.is_char_boundary(end) { end -= 1; }
+            end
+        };
+        let clean = &clean[..cap];
+
         let mut first_id: i64 = 0;
-        for i in (0..clean.len().min(20000)).step_by(CHUNK) {
-            let chunk = &clean[i..(i + CHUNK).min(clean.len())];
+        let mut pos = 0;
+        while pos < clean.len() {
+            // Walk the chunk end back to a valid char boundary
+            let mut end = (pos + CHUNK).min(clean.len());
+            while !clean.is_char_boundary(end) { end -= 1; }
+            if end == pos { break; } // safety: can't make progress (shouldn't happen)
+            let chunk = &clean[pos..end];
+            pos = end;
+
             let resp: serde_json::Value = self.http.post(self.api("sendMessage"))
                 .json(&json!({ "chat_id": chat_id, "text": chunk, "parse_mode": "Markdown" }))
                 .send().await?
