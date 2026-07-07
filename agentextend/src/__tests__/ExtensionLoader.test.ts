@@ -1,0 +1,1 @@
+[{'./types': 'import { ExtensionManifest'}, {'fs as fsPromises': "'fs", "import { promises }, {'loader.loadManifest": 'const manifest = await'}, {'"extension1"': "'./__mocks__/extensions/extension1"}, {'manifest.main': "'index.js"}, {'manifest.version': "'1.0.0"}]

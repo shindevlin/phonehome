@@ -25,3 +25,7 @@ chrono = { version = "0.4", features = ["clock"] }
 hound = "3"
 rustfft = "6"
 half = "2"
+ed25519-dalek = "2"
+hex = "0.4"
+base64 = "0.22"
+rayon = "1"

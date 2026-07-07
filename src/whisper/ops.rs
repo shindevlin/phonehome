@@ -1,45 +1,56 @@
-/// y = x @ W + b   where x:[m,k], W:[k,n], b:[n]  →  y:[m,n]
+use rayon::prelude::*;
+
+/// y = x @ W + b   where x:[m,k], W stored GGML column-major [k,n], b:[n]  →  y:[m,n]
+/// GGML stores weights with ne0=k (input dim) fastest: W[l,j] = w[j*k + l].
+/// Parallelized over output rows.
 pub fn linear(x: &[f32], w: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     let mut y = vec![0f32; m * n];
-    for i in 0..m {
+    y.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
         for j in 0..n {
             let mut s = b[j];
             for l in 0..k {
-                s += x[i * k + l] * w[l * n + j];
+                s += x[i * k + l] * w[j * k + l];
             }
-            y[i * n + j] = s;
+            row[j] = s;
         }
-    }
+    });
     y
 }
 
-/// Like linear but no bias
+/// Single-row linear: x:[k], w GGML column-major [k,n], b:[n] → y:[n]
+pub fn linear1(x: &[f32], w: &[f32], b: &[f32], k: usize, n: usize) -> Vec<f32> {
+    (0..n).map(|j| {
+        let mut s = b[j];
+        for l in 0..k {
+            s += x[l] * w[j * k + l];
+        }
+        s
+    }).collect()
+}
+
+/// Single-row matmul (no bias): x:[k], w GGML column-major [k,n] → y:[n]
+pub fn matmul1(x: &[f32], w: &[f32], k: usize, n: usize) -> Vec<f32> {
+    (0..n).map(|j| {
+        let mut s = 0.0f32;
+        for l in 0..k {
+            s += x[l] * w[j * k + l];
+        }
+        s
+    }).collect()
+}
+
+/// Like linear but no bias — parallelized over output rows.
 pub fn matmul(x: &[f32], w: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     let mut y = vec![0f32; m * n];
-    for i in 0..m {
+    y.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
         for j in 0..n {
             let mut s = 0.0f32;
             for l in 0..k {
-                s += x[i * k + l] * w[l * n + j];
+                s += x[i * k + l] * w[j * k + l];
             }
-            y[i * n + j] = s;
+            row[j] = s;
         }
-    }
-    y
-}
-
-/// x:[m,k], w_T:[n,k] (already transposed storage)  → y:[m,n]
-pub fn matmul_bt(x: &[f32], wt: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
-    let mut y = vec![0f32; m * n];
-    for i in 0..m {
-        for j in 0..n {
-            let mut s = 0.0f32;
-            for l in 0..k {
-                s += x[i * k + l] * wt[j * k + l];
-            }
-            y[i * n + j] = s;
-        }
-    }
+    });
     y
 }
 
@@ -56,6 +67,15 @@ pub fn layer_norm(x: &[f32], w: &[f32], b: &[f32], rows: usize, cols: usize) -> 
         }
     }
     y
+}
+
+/// Layer norm for a single row.
+pub fn layer_norm1(x: &[f32], w: &[f32], b: &[f32], d: usize) -> Vec<f32> {
+    const EPS: f32 = 1e-5;
+    let mean = x.iter().sum::<f32>() / d as f32;
+    let var = x.iter().map(|&v| (v - mean).powi(2)).sum::<f32>() / d as f32;
+    let inv_std = 1.0 / (var + EPS).sqrt();
+    (0..d).map(|j| (x[j] - mean) * inv_std * w[j] + b[j]).collect()
 }
 
 pub fn gelu(x: &mut [f32]) {
@@ -81,27 +101,8 @@ pub fn softmax_rows(x: &mut [f32], rows: usize, cols: usize) {
     }
 }
 
-/// Causal masked softmax (sets upper triangle to -inf before softmax)
-pub fn softmax_causal(x: &mut [f32], rows: usize, cols: usize) {
-    for i in 0..rows {
-        for j in (i + 1)..cols {
-            x[i * cols + j] = f32::NEG_INFINITY;
-        }
-        let row = &mut x[i * cols..(i + 1) * cols];
-        let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f32;
-        for v in row.iter_mut() {
-            *v = if v.is_finite() { (*v - max).exp() } else { 0.0 };
-            sum += *v;
-        }
-        for v in row.iter_mut() {
-            *v /= sum;
-        }
-    }
-}
-
 /// 1D convolution: input [in_ch, t_in], weight [out_ch, in_ch, kernel], bias [out_ch]
-/// → output [out_ch, t_out], t_out = (t_in + 2*pad - kernel)/stride + 1
+/// → output [out_ch, t_out]. Parallelized over output channels.
 pub fn conv1d(
     input: &[f32], weight: &[f32], bias: &[f32],
     in_ch: usize, out_ch: usize, t_in: usize,
@@ -109,7 +110,7 @@ pub fn conv1d(
 ) -> Vec<f32> {
     let t_out = (t_in + 2 * pad - kernel) / stride + 1;
     let mut output = vec![0f32; out_ch * t_out];
-    for oc in 0..out_ch {
+    output.par_chunks_mut(t_out).enumerate().for_each(|(oc, row)| {
         for t in 0..t_out {
             let mut s = bias[oc];
             for ic in 0..in_ch {
@@ -122,9 +123,9 @@ pub fn conv1d(
                     }
                 }
             }
-            output[oc * t_out + t] = s;
+            row[t] = s;
         }
-    }
+    });
     output
 }
 
@@ -146,136 +147,95 @@ pub fn mha(
     let k = matmul(x, k_w, t, d, d);
     let v = linear(x, v_w, v_b, t, d, d);
 
-    let mut out = vec![0f32; t * d];
-
+    // Extract contiguous head slices for cache-friendly attention
+    // q_heads[h]: [t, dh], k_heads[h]: [t, dh], v_heads[h]: [t, dh]
+    let mut q_heads = vec![vec![0f32; t * dh]; n_head];
+    let mut k_heads = vec![vec![0f32; t * dh]; n_head];
+    let mut v_heads = vec![vec![0f32; t * dh]; n_head];
     for h in 0..n_head {
-        // scores [t, t]
+        for i in 0..t {
+            q_heads[h][i * dh..i * dh + dh].copy_from_slice(&q[i * d + h * dh..i * d + h * dh + dh]);
+            k_heads[h][i * dh..i * dh + dh].copy_from_slice(&k[i * d + h * dh..i * d + h * dh + dh]);
+            v_heads[h][i * dh..i * dh + dh].copy_from_slice(&v[i * d + h * dh..i * d + h * dh + dh]);
+        }
+    }
+
+    // Parallel over heads; contiguous slices → cache-friendly matmul
+    let head_outs: Vec<Vec<f32>> = (0..n_head).into_par_iter().map(|h| {
+        let qh = &q_heads[h]; // [t, dh]
+        let kh = &k_heads[h]; // [t, dh]
+        let vh = &v_heads[h]; // [t, dh]
+
+        // scores[t,t] = qh @ kh^T * scale
         let mut scores = vec![0f32; t * t];
         for i in 0..t {
-            for j in 0..t {
-                let mut s = 0.0f32;
-                for l in 0..dh {
-                    s += q[i * d + h * dh + l] * k[j * d + h * dh + l];
+            for l in 0..dh {
+                let qi = qh[i * dh + l] * scale;
+                for j in 0..t {
+                    scores[i * t + j] += qi * kh[j * dh + l];
                 }
-                scores[i * t + j] = s * scale;
             }
         }
         softmax_rows(&mut scores, t, t);
 
-        // weighted sum of v
+        // out[t,dh] = scores @ vh
+        let mut ho = vec![0f32; t * dh];
         for i in 0..t {
-            for l in 0..dh {
-                let mut s = 0.0f32;
-                for j in 0..t {
-                    s += scores[i * t + j] * v[j * d + h * dh + l];
+            for j in 0..t {
+                let s = scores[i * t + j];
+                for l in 0..dh {
+                    ho[i * dh + l] += s * vh[j * dh + l];
                 }
-                out[i * d + h * dh + l] = s;
             }
+        }
+        ho
+    }).collect();
+
+    let mut out = vec![0f32; t * d];
+    for h in 0..n_head {
+        for i in 0..t {
+            out[i * d + h * dh..i * d + h * dh + dh].copy_from_slice(&head_outs[h][i * dh..i * dh + dh]);
         }
     }
 
-    // output projection: out = out @ out_w + out_b
     linear(&out, out_w, out_b, t, d, d)
 }
 
-/// Cross-attention: query from x, key/value from enc.
-/// x: [t_dec, d], enc: [t_enc, d]
-pub fn cross_attn(
-    x: &[f32], enc: &[f32],
-    q_w: &[f32], q_b: &[f32],
-    k_w: &[f32],
-    v_w: &[f32], v_b: &[f32],
-    out_w: &[f32], out_b: &[f32],
-    t_dec: usize, t_enc: usize, d: usize, n_head: usize,
-) -> Vec<f32> {
-    let dh = d / n_head;
-    let scale = 1.0 / (dh as f32).sqrt();
-
-    let q = linear(x, q_w, q_b, t_dec, d, d);
-    let k = matmul(enc, k_w, t_enc, d, d);
-    let v = linear(enc, v_w, v_b, t_enc, d, d);
-
-    let mut out = vec![0f32; t_dec * d];
-
-    for h in 0..n_head {
-        let mut scores = vec![0f32; t_dec * t_enc];
-        for i in 0..t_dec {
-            for j in 0..t_enc {
-                let mut s = 0.0f32;
-                for l in 0..dh {
-                    s += q[i * d + h * dh + l] * k[j * d + h * dh + l];
-                }
-                scores[i * t_enc + j] = s * scale;
-            }
-        }
-        softmax_rows(&mut scores, t_dec, t_enc);
-
-        for i in 0..t_dec {
-            for l in 0..dh {
-                let mut s = 0.0f32;
-                for j in 0..t_enc {
-                    s += scores[i * t_enc + j] * v[j * d + h * dh + l];
-                }
-                out[i * d + h * dh + l] = s;
-            }
-        }
-    }
-
-    linear(&out, out_w, out_b, t_dec, d, d)
-}
-
-/// Causal self-attention for decoder (token sequence grows step by step).
-/// x: [t, d] (full sequence so far)
-pub fn causal_mha(
-    x: &[f32],
-    q_w: &[f32], q_b: &[f32],
-    k_w: &[f32],
-    v_w: &[f32], v_b: &[f32],
-    out_w: &[f32], out_b: &[f32],
+/// Cached single-query attention: q:[d], k_cache:[t,d], v_cache:[t,d] → out:[d]
+/// Used for both self-attention (causal, attend to all t) and cross-attention.
+pub fn attn_single_query(
+    q: &[f32],
+    k_cache: &[f32], v_cache: &[f32],
     t: usize, d: usize, n_head: usize,
 ) -> Vec<f32> {
     let dh = d / n_head;
     let scale = 1.0 / (dh as f32).sqrt();
-
-    let q = linear(x, q_w, q_b, t, d, d);
-    let k = matmul(x, k_w, t, d, d);
-    let v = linear(x, v_w, v_b, t, d, d);
-
-    let mut out = vec![0f32; t * d];
+    let mut out = vec![0f32; d];
 
     for h in 0..n_head {
-        let mut scores = vec![0f32; t * t];
-        for i in 0..t {
-            for j in 0..=i {
-                let mut s = 0.0f32;
-                for l in 0..dh {
-                    s += q[i * d + h * dh + l] * k[j * d + h * dh + l];
-                }
-                scores[i * t + j] = s * scale;
-            }
-            // upper triangle stays 0 → after softmax over 0..=i it's ignored
-        }
-        // softmax over valid positions only
-        for i in 0..t {
-            let row = &mut scores[i * t..i * t + i + 1];
-            let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f32;
-            for v in row.iter_mut() { *v = (*v - max).exp(); sum += *v; }
-            for v in row.iter_mut() { *v /= sum; }
-        }
-
-        for i in 0..t {
+        let mut scores = vec![0f32; t];
+        for j in 0..t {
+            let mut s = 0.0f32;
             for l in 0..dh {
-                let mut s = 0.0f32;
-                for j in 0..=i {
-                    s += scores[i * t + j] * v[j * d + h * dh + l];
-                }
-                out[i * d + h * dh + l] = s;
+                s += q[h * dh + l] * k_cache[j * d + h * dh + l];
             }
+            scores[j] = s * scale;
+        }
+        // softmax
+        let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        for s in &mut scores { *s = (*s - max).exp(); sum += *s; }
+        for s in &mut scores { *s /= sum; }
+
+        for l in 0..dh {
+            let mut s = 0.0f32;
+            for j in 0..t {
+                s += scores[j] * v_cache[j * d + h * dh + l];
+            }
+            out[h * dh + l] = s;
         }
     }
-
-    linear(&out, out_w, out_b, t, d, d)
+    out
 }
 
 pub fn add_inplace(a: &mut [f32], b: &[f32]) {

@@ -37,7 +37,6 @@ pub fn transcribe(wav_path: &std::path::Path) -> Result<String> {
     let g = ggml::load(&model_path())?;
     let n_mels     = g.hparams.n_mels;
     let n_fft_bins = g.n_fft_bins;
-    let n_audio_ctx = g.hparams.n_audio_ctx;
     let vocab      = g.vocab.clone();
     let filters    = g.mel_filters.clone();
     let model      = model::Whisper::from_ggml(g);
@@ -46,55 +45,104 @@ pub fn transcribe(wav_path: &std::path::Path) -> Result<String> {
     let reader = hound::WavReader::open(wav_path)?;
     let samples: Vec<f32> = reader
         .into_samples::<i16>()
-        .filter_map(|s| s.ok())
+        .collect::<std::result::Result<Vec<i16>, _>>()?
+        .into_iter()
         .map(|s| s as f32 / 32768.0)
         .collect();
 
-    // Mel spectrogram
+    let audio_secs = (samples.len() as f32 / 16000.0).min(30.0);
+    eprintln!("[whisper] {:.1}s audio", audio_secs);
+
+    // Mel spectrogram → encoder
     let mel = mel::log_mel(&samples, &filters, n_mels, n_fft_bins);
-
-    // Encode
     let enc = model.encode(&mel)?;
+    let mut cache = model.init_kv_cache(&enc)?;
+    decode_greedy(&model, &mut cache, &vocab, audio_secs)
+}
 
-    // Decode (greedy)
-    decode_greedy(&model, &enc, n_audio_ctx, &vocab)
+fn tok(vocab: &[String], name: &str) -> Option<u32> {
+    vocab.iter().position(|s| s == name).map(|i| i as u32)
 }
 
 fn decode_greedy(
     model: &model::Whisper,
-    enc: &[f32],
-    t_enc: usize,
+    cache: &mut model::KVCache,
     vocab: &[String],
+    audio_secs: f32,
 ) -> Result<String> {
-    // Special token IDs for base.en
-    const SOT: u32 = 50258;        // <|startoftranscript|>
-    const TRANSCRIBE: u32 = 50359; // <|transcribe|>
-    const NO_TIMESTAMPS: u32 = 50363;
-    const EOT: u32 = 50257;        // <|endoftext|>
-    const MAX_TOKENS: usize = 224;
+    // Look up special tokens by name so we work with any Whisper variant
+    let eot  = tok(vocab, "<|endoftext|>").unwrap_or(50256);
+    let sot  = tok(vocab, "<|startoftranscript|>").unwrap_or(50257);
+    let task = tok(vocab, "<|transcribe|>").unwrap_or(50359);
+    let nots = tok(vocab, "<|notimestamps|>").unwrap_or(50363);
 
-    let mut tokens: Vec<u32> = vec![SOT, TRANSCRIBE, NO_TIMESTAMPS];
+    // Cap at ~10 tokens/sec. EOT is the primary stop; this cuts hallucination on silence padding.
+    let max_tokens = ((audio_secs * 10.0) as usize + 16).min(224);
+
+    // Feed prompt tokens; logits from the last one start generation.
+    let prompt = [sot, task, nots];
+    let mut logits = Vec::new();
+    for (pos, &t) in prompt.iter().enumerate() {
+        logits = model.decode_step_cached(t, pos, cache)?;
+    }
+
     let mut text = String::new();
+    let mut pos = prompt.len();
+    let mut generated: Vec<u32> = Vec::new();
 
-    for _ in 0..MAX_TOKENS {
-        let logits = model.decode_step(&tokens, enc, t_enc)?;
+    for _ in 0..max_tokens {
+        // Suppress tokens seen in the last 64 generated tokens
+        let suppress_start = generated.len().saturating_sub(64);
+        let recent: std::collections::HashSet<u32> = generated[suppress_start..].iter().cloned().collect();
 
-        // Suppress special/timestamp tokens
+        // Allow EOT in the pool so the model can signal end-of-speech naturally.
+        // Any token >= sot is a special token; allow only EOT through, stop on anything else.
         let next = logits.iter().enumerate()
-            .filter(|&(i, _)| i < 50257) // only real text tokens
+            .filter(|&(i, _)| (i as u32) <= eot)
+            .filter(|&(i, _)| !recent.contains(&(i as u32)))
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .or_else(|| logits.iter().enumerate()
+                .filter(|&(i, _)| (i as u32) <= eot)
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()))
             .map(|(i, _)| i as u32)
-            .unwrap_or(EOT);
+            .unwrap_or(eot);
 
-        if next == EOT { break; }
-        tokens.push(next);
+        if next == eot { break; }
+
+        // Hard stop: last 4 tokens identical
+        if generated.len() >= 4 && generated[generated.len()-4..].iter().all(|&t| t == next) {
+            break;
+        }
+
+        // Cycle detection: if the last 8 tokens reappear as a sequence, we're looping
+        if generated.len() >= 16 {
+            let tail = &generated[generated.len()-8..];
+            if generated[..generated.len()-8].windows(8).any(|w| w == tail) {
+                break;
+            }
+        }
 
         if let Some(word) = vocab.get(next as usize) {
             text.push_str(word);
         }
 
-        if tokens.len() >= MAX_TOKENS + 3 { break; }
+        generated.push(next);
+        logits = model.decode_step_cached(next, pos, cache)?;
+        pos += 1;
     }
 
     Ok(text.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn transcribe_tone() {
+        let p = std::path::Path::new("/tmp/ph_test.wav");
+        if !p.exists() { eprintln!("skip: no test wav"); return; }
+        let result = transcribe(p);
+        println!("transcribe result: {:?}", result);
+        assert!(result.is_ok(), "transcribe panicked: {:?}", result);
+    }
 }

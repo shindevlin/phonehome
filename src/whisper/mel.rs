@@ -1,6 +1,6 @@
 use rustfft::{FftPlanner, num_complex::Complex};
 
-const N_FFT: usize = 512;
+const N_FFT: usize = 400;  // whisper uses 25ms window = 400 samples at 16kHz → 201 bins
 const HOP: usize = 160;
 const WIN: usize = 400;
 pub const N_SAMPLES_30S: usize = 16000 * 30;
@@ -12,9 +12,9 @@ pub fn log_mel(samples: &[f32], filters: &[f32], n_mel: usize, n_fft_bins: usize
     let mut audio = samples.to_vec();
     audio.resize(N_SAMPLES_30S, 0.0);
 
-    // Hann window
+    // Periodic Hann window (matches torch.hann_window default used by openai-whisper)
     let window: Vec<f32> = (0..WIN)
-        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (WIN - 1) as f32).cos()))
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / WIN as f32).cos()))
         .collect();
 
     let n_frames = (N_SAMPLES_30S - WIN) / HOP + 1; // 2998, whisper pads to 3000

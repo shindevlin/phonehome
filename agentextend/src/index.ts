@@ -1,0 +1,1 @@
+[{'./ExtensionLoader': 'import { ExtensionManifest'}, {'loader': ', error);\n});'}]

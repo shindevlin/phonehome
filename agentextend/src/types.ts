@@ -1,0 +1,1 @@
+[{'zod": "import { z } from "': 'export const ExtensionManifestSchema ='}, {'";\n\nexport type ExtensionManifest = z.infer<typeof ExtensionManifestSchema': ';'}]

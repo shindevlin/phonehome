@@ -1,0 +1,1 @@
+{'run': 'function() {\n    return', 'extension!': ''}

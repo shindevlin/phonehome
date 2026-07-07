@@ -1,0 +1,1 @@
+[{"vm';\nimport { ExtensionManifest": 'import vm from "vm'}, {'const sandbox = {\n    console': ',\n    setTimeout\'}, {\'createContext(sandbox\': \'const context = vm.\'}, {\'code\': \'await fs.readFile(indexPath\', \'"utf-8'}]

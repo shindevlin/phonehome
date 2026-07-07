@@ -72,7 +72,7 @@ pub fn load(path: &std::path::Path) -> Result<GgmlFile> {
 
     // mel filters
     let n_mel  = read_i32!();
-    let n_fft  = read_i32!(); // 257 = n_fft/2+1
+    let n_fft  = read_i32!(); // 201 = N_FFT/2+1 where N_FFT=400
     let nf = n_mel * n_fft;
     let mel_filters: Vec<f32> = (0..nf)
         .map(|_| { let v = f32::from_le_bytes(data[cur..cur+4].try_into().unwrap()); cur += 4; v })

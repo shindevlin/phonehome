@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use tokio::time::{sleep, Duration, Instant};
 
 use crate::config::Config;
+use crate::routes;
 use crate::telegram::TelegramClient;
 
 pub async fn run(cfg: Config) -> Result<()> {
@@ -15,12 +16,25 @@ pub async fn run(cfg: Config) -> Result<()> {
     std::io::stdin().read_to_string(&mut raw)?;
 
     let data: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let hook_cwd = data["cwd"].as_str().unwrap_or("");
+
+    let all_routes = routes::load();
+    let dest = routes::resolve(&all_routes, hook_cwd, cfg.chat_id, &cfg.cwd);
+    let (chat_id, thread_id) = match dest {
+        Some(d) => d,
+        None => return Ok(()), // no route registered for this repo
+    };
+
     let session_id = data["session_id"].as_str().unwrap_or("").trim().to_string();
     if session_id.is_empty() {
         return Ok(());
     }
 
     cfg.write_session(&session_id);
+    // Remember which repo was active so the bot can route correctly
+    if !hook_cwd.is_empty() {
+        cfg.write_active_cwd(hook_cwd);
+    }
 
     let projects_dir = home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/root"))
@@ -61,7 +75,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     append_log(&log_path, "Claude", &last_text);
 
     let tg = TelegramClient::new(&cfg.bot_token);
-    tg.send(cfg.chat_id, &last_text).await?;
+    tg.send_to(chat_id, thread_id, &last_text).await?;
     Ok(())
 }
 

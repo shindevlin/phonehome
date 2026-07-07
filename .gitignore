@@ -1,1 +1,4 @@
 target/
+graphify-out/
+.phonehome
+.claude/

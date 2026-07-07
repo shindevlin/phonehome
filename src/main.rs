@@ -1,10 +1,13 @@
 mod backend;
 mod bot;
+mod chat_log;
 mod whisper;
 mod config;
 mod echo;
 mod init;
+mod link;
 mod notify;
+mod routes;
 mod telegram;
 mod transcribe;
 
@@ -39,6 +42,18 @@ enum Cmd {
         #[arg(long, default_value = "claude")]
         backend: String,
     },
+    /// Register a directory so phonehome watches it and routes sessions from it
+    Link {
+        /// Path to register (defaults to current directory)
+        path: Option<std::path::PathBuf>,
+    },
+    /// Remove a directory from the watch list
+    Unlink {
+        /// Path to remove (defaults to current directory)
+        path: Option<std::path::PathBuf>,
+    },
+    /// List all linked directories
+    Links,
 }
 
 #[tokio::main]
@@ -65,6 +80,9 @@ async fn main() -> Result<()> {
         Cmd::Init { bot_token, chat_id, backend } => {
             init::run(bot_token, chat_id, backend)?;
         }
+        Cmd::Link { path } => link::link(path)?,
+        Cmd::Unlink { path } => link::unlink(path)?,
+        Cmd::Links => link::list()?,
     }
     Ok(())
 }
